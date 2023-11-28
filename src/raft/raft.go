@@ -86,9 +86,12 @@ type Raft struct {
 
 	// for leader
 	// if the current raft instance is not a leader, they will be set to nil
-	nextIndex            []int // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-	matchIndex           []int // for each server, index of the highest log entry known to be replicated on server (initialized to 0, increases monotonically)
-	cancelBroadcastHeart chan struct{}
+	nextIndex                []int // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
+	matchIndex               []int // for each server, index of the highest log entry known to be replicated on server (initialized to 0, increases monotonically)
+	cancelBroadcastHeartbeat chan struct{}
+
+	applyCh   chan ApplyMsg
+	applyCond *sync.Cond
 }
 
 func (rf *Raft) lock() {
@@ -173,9 +176,59 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
-
 	// Your code here (2B).
 
+	// check whether the rf is a leader
+	term, isLeader = rf.GetState()
+	if !isLeader {
+		return index, term, isLeader
+	}
+
+	rf.lock()
+	defer rf.unlock()
+
+	//lastLog := rf.lastLog()
+
+	// appendLogs a new entry after entries array
+	entry := Entry{
+		Term:    rf.currentTerm,
+		Index:   rf.logs.LastIndex + 1,
+		Command: command,
+	}
+	rf.appendLogs(entry)
+	log.Printf("leader %d append entry, index: %d, term: %d\n", rf.me, entry.Index, entry.Term)
+
+	lastLog := rf.lastLog()
+	// send AppendEntries RPC to every follower
+	for peer, _ := range rf.peers {
+		if peer != rf.me {
+			//  If last log index ≥ nextIndex for a follower: send
+			// AppendEntries RPC with log entries starting at nextIndex
+			if lastLog.Index >= rf.nextIndex[peer] {
+				nextIdx := rf.nextIndex[peer]
+				if nextIdx <= 0 {
+					nextIdx = 1
+				}
+				if lastLog.Index+1 < nextIdx {
+					nextIdx = lastLog.Index
+				}
+				prevLog := rf.logAt(nextIdx - 1)
+				args := &AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: prevLog.Index,
+					PrevLogTerm:  prevLog.Term,
+					LeaderCommit: rf.commitIndex,
+					Entries:      make([]Entry, lastLog.Index-nextIdx+1),
+				}
+				copy(args.Entries, rf.logSlice(nextIdx))
+				log.Printf("leader %d send %d entries to %d, start at index: %d\n", rf.me, len(args.Entries), peer, nextIdx)
+				go rf.sendAppendEntries(peer, args)
+			}
+		}
+	}
+
+	index, term = entry.Index, entry.Term
 	return index, term, isLeader
 }
 
@@ -219,6 +272,35 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) apply() {
+	rf.applyCond.Signal()
+}
+
+func (rf *Raft) applier() {
+	rf.lock()
+	defer rf.unlock()
+
+	for !rf.killed() {
+		// If commitIndex > lastApplied: increment lastApplied, apply
+		// log[lastApplied] to state machine
+		if rf.commitIndex > rf.lastApplied && rf.lastLogIndex() > rf.lastApplied {
+			rf.lastApplied++
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logAt(rf.lastApplied).Command,
+				CommandIndex: rf.lastApplied,
+			}
+			log.Printf("%d applied index: %d\n", rf.me, rf.lastApplied)
+			// to avoid channel block
+			rf.unlock()
+			rf.applyCh <- applyMsg
+			rf.lock()
+		} else {
+			rf.applyCond.Wait()
+		}
+	}
+}
+
 // Make
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -241,14 +323,22 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs = NewRLog()
 	rf.voteFor = -1
 	rf.resetElectionTime()
+
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+
+	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	go rf.applier()
 
 	return rf
 }
