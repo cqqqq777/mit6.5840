@@ -30,7 +30,7 @@ func (rf *Raft) heartbeatTicker() {
 			runtime.Goexit()
 		default:
 			lastLog := rf.lastLog()
-			for peer, _ := range rf.peers {
+			for peer := range rf.peers {
 				if peer != rf.me {
 					nextIndex := rf.nextIndex[peer]
 					if nextIndex <= 0 {
@@ -74,7 +74,7 @@ func (rf *Raft) tryCommit() {
 			continue
 		}
 		counter := 1
-		for peer, _ := range rf.peers {
+		for peer := range rf.peers {
 			if peer != rf.me && rf.matchIndex[peer] >= n {
 				counter++
 			}

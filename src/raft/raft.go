@@ -200,7 +200,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	lastLog := rf.lastLog()
 	// send AppendEntries RPC to every follower
-	for peer, _ := range rf.peers {
+	for peer := range rf.peers {
 		if peer != rf.me {
 			//  If last log index ≥ nextIndex for a follower: send
 			// AppendEntries RPC with log entries starting at nextIndex
