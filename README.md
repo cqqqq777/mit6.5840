@@ -27,7 +27,7 @@ func (rf *Raft) ticker() {
        // follower and candidate check whether election timeout
        if time.Now().After(rf.electTime) && rf.state != Leader {
           log.Printf("%d become candidate\n", rf.me)
-         	// 自身发起选举，重置 electTime
+          // 自身发起选举，重置 electTime
           rf.resetElectionTime()
           rf.becomeCandidate()
        }
@@ -41,7 +41,7 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) resetElectionTime() {
 	t := time.Now()
-  // 因为 test 限制一秒内不能发出超过十次心跳，所以选举超时时间应该适当延长
+        // 因为 test 限制一秒内不能发出超过十次心跳，所以选举超时时间应该适当延长
 	timeOut := time.Duration(300+rand.Intn(300)) * time.Millisecond
 	rf.electTime = t.Add(timeOut)
 }
@@ -71,7 +71,7 @@ func (rf *Raft) startElection() {
     rejectCount, grantCount := 0, 1
     once := &sync.Once{}
     lastLog := rf.lastLog()
-  	// args 和 reply 都根据图二补充完整
+    // args 和 reply 都根据图二补充完整
     args := &RequestVoteArgs{
        Term:         rf.currentTerm,
        CandidateID:  rf.me,
@@ -154,7 +154,7 @@ func (rf *Raft) becomeLeader() {
 	if rf.state == Follower {
 		panic("can't become to leader from follower")
 	}
-  // 用于在 leader 退位后关闭发送心跳的线程，避免 goroutine 一直堆积
+  	// 用于在 leader 退位后关闭发送心跳的线程，避免 goroutine 一直堆积
 	rf.cancelBroadcastHeartbeat = make(chan struct{})
 	rf.voteFor = -1
 	rf.state = Leader
