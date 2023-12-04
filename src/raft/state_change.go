@@ -110,7 +110,7 @@ func (rf *Raft) becomeFollower(term int) {
 }
 
 func (rf *Raft) stopBroadcastHeartbeat() {
-	// to avoid goroutine leak
+	// timer to avoid goroutine leak
 	timer := time.After(time.Second * 3)
 	select {
 	case rf.cancelBroadcastHeartbeat <- struct{}{}:
