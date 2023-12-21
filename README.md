@@ -62,7 +62,7 @@ func (rf *Raft) becomeCandidate() {
 1. 自增 term
 2. 投票给自己
 3. 重置 election timer
-4. 向每个几点发送 RequestVote RPC
+4. 向所有节点发送 RequestVote RPC
 
 ```go
 func (rf *Raft) startElection() {
@@ -281,11 +281,304 @@ follower 在判断是否接受日志时，可能会有以下情况：
 - 在 follower 发现日志滞后时，reply 中增加一些字段来让 leader 可以一次性把缺失的日志全部发过来，这个必要性不大，实际情况滞后的概率较小，不优化也可以过测试函数。
 - follower 日志滞后，后面再次发出同步日志请求时可以随心跳一起发送给用户。
 
+先实现 start 函数，追加到自己日志末尾后向每一个节点发送 AppendEntries RPC。
+
+```go
+func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	index := -1
+	term := -1
+	isLeader := true
+	// Your code here (2B).
+
+	// check whether the rf is a leader
+	term, isLeader = rf.GetState()
+	if !isLeader {
+		return index, term, isLeader
+	}
+
+	rf.lock()
+	defer rf.unlock()
+
+	//lastLog := rf.lastLog()
+
+	// appendLogs a new entry after entries array
+	entry := Entry{
+		Term:    rf.currentTerm,
+		Index:   rf.logs.LastIndex + 1,
+		Command: command,
+	}
+	rf.appendLogs(entry)
+	rf.persist()
+	log.Printf("leader %d append entry, index: %d, term: %d\n", rf.me, entry.Index, entry.Term)
+
+	lastLog := rf.lastLog()
+	// send AppendEntries RPC to every follower
+	for peer := range rf.peers {
+		if peer != rf.me {
+			//  If last log index ≥ nextIndex for a follower: send
+			// AppendEntries RPC with log entries starting at nextIndex
+			if lastLog.Index >= rf.nextIndex[peer] {
+				nextIdx := rf.nextIndex[peer]
+				if nextIdx <= 0 {
+					nextIdx = 1
+				}
+				if lastLog.Index+1 < nextIdx {
+					nextIdx = lastLog.Index
+				}
+				prevLog := rf.logAt(nextIdx - 1)
+				args := &AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: prevLog.Index,
+					PrevLogTerm:  prevLog.Term,
+					LeaderCommit: rf.commitIndex,
+					Entries:      make([]Entry, lastLog.Index-nextIdx+1),
+				}
+				copy(args.Entries, rf.logSlice(nextIdx))
+				log.Printf("leader %d send %d entries to %d, start at index: %d\n", rf.me, len(args.Entries), peer, nextIdx)
+				go rf.sendAppendEntries(peer, args)
+			}
+		}
+	}
+
+	index, term = entry.Index, entry.Term
+	return index, term, isLeader
+}
+```
+
+AppendEntries 分了两种，一种是心跳，一种是日志追加，心跳是单向的不用管响应值，但需要处理日志追加请求的响应。
+
+当发现不是因为任期问题而被拒绝时，就递归的向其发送前一条日志，发送的时机为心跳的时候。
+
+```go
+// leader sends AppendEntries RPC to peers
+func (rf *Raft) sendAppendEntries(peer int, args *AppendEntriesArgs) {
+	reply := &AppendEntriesReply{}
+	if !rf.peers[peer].Call("Raft.AppendEntries", args, reply) {
+		return
+	}
+	rf.lock()
+	defer rf.unlock()
+
+	if rf.state != Leader || reply.Term < rf.currentTerm {
+		return
+	}
+
+	if reply.Term > rf.currentTerm {
+		rf.becomeFollower(reply.Term)
+		return
+	}
+
+	if args.Term == rf.currentTerm {
+		if reply.Success {
+			// update nextIndex and matchIndex
+			match := args.PrevLogIndex + len(args.Entries)
+			next := match + 1
+			rf.nextIndex[peer] = max(next, rf.nextIndex[peer])
+			rf.matchIndex[peer] = max(match, rf.matchIndex[peer])
+			log.Printf("leader %d AppendEntries for %d successfully, match: %d, next: %d\n", rf.me, peer, match, next)
+		} else if rf.nextIndex[peer] > 1 && len(args.Entries) != 0 {
+			rf.nextIndex[peer]--
+		}
+		rf.tryCommit()
+	}
+}
+```
+
+lab2 B 中还要完成的一点是将被大多数节点同步的日志应用到状态机中，论文图二中 leader 应该遵守的最后一条规则说明了什么样的日志应该被提交。
+
+```go
+func (rf *Raft) tryCommit() {
+    if rf.state != Leader {
+       return
+    }
+    // If there exists an N such that N > commitIndex, a majority
+    // of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+    // set commitIndex = N
+    for n := rf.commitIndex + 1; n <= rf.lastLogIndex(); n++ {
+       if rf.logAt(n).Term != rf.currentTerm {
+          continue
+       }
+       counter := 1
+       for peer := range rf.peers {
+          if peer != rf.me && rf.matchIndex[peer] >= n {
+             counter++
+          }
+          if counter > len(rf.peers)/2 {
+             rf.commitIndex = n
+             log.Printf("leader %d commit log at index: %d\n", rf.me, n)
+             rf.apply()
+             break
+          }
+       }
+    }
+}
+
+// apply 根据 lab 的提示，使用一个条件变量来控制 applier
+func (rf *Raft) apply() {
+	rf.applyCond.Signal()
+}
+
+func (rf *Raft) applier() {
+	rf.lock()
+	defer rf.unlock()
+
+	for !rf.killed() {
+		// If commitIndex > lastApplied: increment lastApplied, apply
+		// log[lastApplied] to state machine
+		if rf.commitIndex > rf.lastApplied && rf.lastLogIndex() > rf.lastApplied {
+			rf.lastApplied++
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logAt(rf.lastApplied).Command,
+				CommandIndex: rf.lastApplied,
+			}
+			log.Printf("%d applied index: %d\n", rf.me, rf.lastApplied)
+			// to avoid channel block
+			rf.unlock()
+			rf.applyCh <- applyMsg
+			rf.lock()
+		} else {
+			rf.applyCond.Wait()
+		}
+	}
+}
+```
+
+leader 要做的大概就这些了，还有就是 follower 收到 AppendEntries 时的处理。
+
+分为了两种，未携带日志的心跳，携带日志的同步请求
+
+```go
+// AppendEntries
+// Invoked by leader to replicate log entries
+// also used as heartbeat
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.lock()
+	defer rf.unlock()
+
+	// Reply false if term < currentTerm
+	if rf.currentTerm > args.Term {
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	// convert to follower
+	if args.Term > rf.currentTerm {
+		rf.becomeFollower(args.Term)
+	}
+	reply.Term = rf.currentTerm
+
+	rf.resetElectionTime()
+	if len(args.Entries) == 0 {
+		// handle heartbeat
+		rf.handleHeartbeat(args)
+		return
+	}
+
+	// handle AppendEntries RPC
+	rf.handelAppendEntries(args, reply)
+}
+
+func (rf *Raft) handleHeartbeat(args *AppendEntriesArgs) {
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, rf.lastLogIndex())
+		rf.apply()
+	}
+}
+
+func (rf *Raft) handelAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	lastLog := rf.lastLog()
+
+	//  Reply false if log don’t contain an entry at prevLogIndex whose term matches prevLogTerm
+	if lastLog.Index < args.PrevLogIndex || rf.logAt(args.PrevLogIndex).Term != args.PrevLogTerm {
+		log.Printf("%d logs are not contain an entry at Index: %d, Term: %d\n", rf.me, args.PrevLogIndex, args.PrevLogTerm)
+		return
+	}
+
+	// If an existing entry conflicts with a new one (same index
+	// but different terms), delete the existing entry and all that
+	// follow it
+	idx := args.PrevLogIndex
+	l := rf.logsLen()
+	for i, entry := range args.Entries {
+		idx++
+		if idx < l {
+			if rf.logAt(idx).Term == entry.Term {
+				continue
+			}
+			rf.removeLogsAfter(idx)
+			rf.persist()
+		}
+
+		// Append any new entries not already in the log
+		log.Printf("%d append %d entries, begin at index: %d, term: %d\n", rf.me, len(args.Entries)-i, entry.Index, entry.Term)
+		rf.appendLogs(args.Entries[i:]...)
+		rf.persist()
+		break
+	}
+	reply.Success = true
+
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, rf.lastLogIndex())
+		rf.apply()
+	}
+
+	// avoid election time out
+	rf.resetElectionTime()
+}
+```
+
 ### Lab2 C
+
+Lab2 C 要做的是持久化，其实我感觉比前两个都要简单，在论文的图二中说明了需要持久化的三个字段，分别是 currentTerm、voteFor 和 log[]，按找给的代码示例，替换成这三个字段，每次这三个字段变化的时候，都持久化即可。
+
+```go
+func (rf *Raft) persist() {
+	// Your code here (2C).
+	// Example:
+	log.Printf("%d persist, term: %d, voteFor: %d, lastLog: term:%d, index: %d \n", rf.me, rf.currentTerm, rf.voteFor, rf.lastLog().Term, rf.lastLog().Index)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.logs)
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, nil)
+}
+
+// restore previously persisted state.
+func (rf *Raft) readPersist(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	// Your code here (2C).
+	// Example:
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var voteFor int
+	var logs RLog
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&voteFor) != nil ||
+		d.Decode(&logs) != nil {
+		log.Fatalf("%d read persist failed\n", rf.me)
+	} else {
+		rf.currentTerm = currentTerm
+		rf.voteFor = voteFor
+		rf.logs = logs
+	}
+}
+```
 
 ### Lab2 D
 
+TODO
 
 ## Lab3
 
+TODO
+
 ## Lab4
+
+TODO
