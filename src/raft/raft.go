@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"bytes"
 	"log"
 	//	"bytes"
 	"math/rand"
@@ -25,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -71,9 +72,9 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	currentTerm int   // latest term server has seen (initialized to 0 on first boot, increases monotonically)
-	voteFor     int   // candidateID that received vote in current term(-1 if none)
-	logs        *RLog //1 log entries, first index is
+	currentTerm int  // latest term server has seen (initialized to 0 on first boot, increases monotonically)
+	voteFor     int  // candidateID that received vote in current term(-1 if none)
+	logs        RLog // log entries, first index is 1
 
 	// Volatile state on all servers
 	commitIndex int
@@ -121,12 +122,14 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	log.Printf("%d persist, term: %d, voteFor: %d, lastLog: term:%d, index: %d \n", rf.me, rf.currentTerm, rf.voteFor, rf.lastLog().Term, rf.lastLog().Index)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.logs)
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, nil)
 }
 
 // restore previously persisted state.
@@ -136,17 +139,20 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var voteFor int
+	var logs RLog
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&voteFor) != nil ||
+		d.Decode(&logs) != nil {
+		log.Fatalf("%d read persist failed\n", rf.me)
+	} else {
+		rf.currentTerm = currentTerm
+		rf.voteFor = voteFor
+		rf.logs = logs
+	}
 }
 
 // Snapshot
@@ -196,6 +202,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.appendLogs(entry)
+	rf.persist()
 	log.Printf("leader %d append entry, index: %d, term: %d\n", rf.me, entry.Index, entry.Term)
 
 	lastLog := rf.lastLog()

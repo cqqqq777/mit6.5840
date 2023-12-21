@@ -76,11 +76,13 @@ func (rf *Raft) handelAppendEntries(args *AppendEntriesArgs, reply *AppendEntrie
 				continue
 			}
 			rf.removeLogsAfter(idx)
+			rf.persist()
 		}
 
 		// Append any new entries not already in the log
 		log.Printf("%d append %d entries, begin at index: %d, term: %d\n", rf.me, len(args.Entries)-i, entry.Index, entry.Term)
 		rf.appendLogs(args.Entries[i:]...)
+		rf.persist()
 		break
 	}
 	reply.Success = true

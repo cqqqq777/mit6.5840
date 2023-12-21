@@ -16,6 +16,7 @@ func (rf *Raft) resetElectionTime() {
 func (rf *Raft) startElection() {
 	rf.currentTerm++
 	rf.voteFor = rf.me
+	rf.persist()
 	rejectCount, grantCount := 0, 1
 	once := &sync.Once{}
 	lastLog := rf.lastLog()

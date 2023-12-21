@@ -46,6 +46,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.voteFor == -1 || rf.voteFor == args.CandidateID) && upToDate {
 		log.Printf("%d vote for %d\n", rf.me, args.CandidateID)
 		rf.voteFor = args.CandidateID
+		rf.persist()
 		reply.VoteGranted = true
 		rf.resetElectionTime()
 	}

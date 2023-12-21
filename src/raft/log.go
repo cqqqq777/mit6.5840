@@ -15,8 +15,8 @@ type RLog struct {
 	LastIndex int
 }
 
-func NewRLog() *RLog {
-	return &RLog{
+func NewRLog() RLog {
+	return RLog{
 		Entries:   make([]Entry, 1, 1024),
 		LastIndex: 0,
 	}

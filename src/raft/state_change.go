@@ -16,6 +16,7 @@ func (rf *Raft) becomeLeader() {
 	}
 	rf.cancelBroadcastHeartbeat = make(chan struct{})
 	rf.voteFor = -1
+	rf.persist()
 	rf.state = Leader
 	go rf.heartbeatTicker()
 }
@@ -103,6 +104,7 @@ func (rf *Raft) becomeFollower(term int) {
 	}
 	rf.voteFor = -1
 	rf.currentTerm = term
+	rf.persist()
 	if rf.state != Follower {
 		log.Printf("%d become follower\n", rf.me)
 		rf.state = Follower
